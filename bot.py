@@ -1,22 +1,23 @@
-# batch_update_pyrogram.py
+import os
 import re
 import asyncio
 import logging
 from pyrogram import Client, filters
 from pyrogram.errors import FloodWait, RPCError
 
+# Logging সেটআপ
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ====== CONFIG: বদলে দিন ======
-API_ID = 25976192           # my.telegram.org থেকে নেওয়া API_ID
-API_HASH = "8ba23141980539b4896e5adbc4ffd2e2" 
-BOT_TOKEN = "8257089548:AAG3hpoUToom6a71peYep-DBfgPiKU3wPGE"  # @BotFather থেকে পাওয়া bot token
-# ==============================
+# Environment Variables থেকে কনফিগারেশন
+API_ID = int(os.environ.get('API_ID', '25976192'))
+API_HASH = os.environ.get('API_HASH', '8ba23141980539b4896e5adbc4ffd2e2')
+BOT_TOKEN = os.environ.get('BOT_TOKEN', '8257089548:AAG3hpoUToom6a71peYep-DBfgPiKU3wPGE')
 
-RS_USERNAMES = [None, None, None]  # আপনার সেট করা তিনটি ইউজারনেম
+# গ্লোবাল ইউজারনেম স্টোর
+RS_USERNAMES = [None, None, None]
 
-# ========== Helper functions ==========
+# হেল্পার ফাংশন
 def _normalize_username(u: str) -> str:
     if not u:
         return None
@@ -28,56 +29,52 @@ def _normalize_username(u: str) -> str:
     return u
 
 def replace_all_usernames(text: str, new_usernames: list) -> str:
-    """
-    প্রতিটি মিল পাওয়া অংশকে সিরিয়ালি প্রতিস্থাপন করে।
-    - 1ম মিল -> new_usernames[0], 2য় -> new_usernames[1], 3য় -> new_usernames[2]
-    - ফরম্যাট ধরে রাখা হবে: যদি মূল ছিল '@old' রাখা হবে '@new', যদি 't.me/old' থাকলে 't.me/new',
-      যদি 'https://t.me/old' থাকলে 'https://t.me/new'
-    """
     if not text or not new_usernames or all(u is None for u in new_usernames):
         return text
-
     pattern = r'@[a-zA-Z0-9_]{1,32}|t\.me/[a-zA-Z0-9_]{1,32}|https?://(?:www\.)?t\.me/[a-zA-Z0-9_]{1,32}'
     matches = list(re.finditer(pattern, text, flags=re.IGNORECASE))
     if not matches:
         return text
-
     result = []
     last_idx = 0
     for i, m in enumerate(matches):
         start, end = m.span()
         orig = m.group(0)
         result.append(text[last_idx:start])
-
         if i < len(new_usernames) and new_usernames[i]:
             newu = new_usernames[i]
-            # preserve format
             if orig.startswith("@"):
                 replacement = f"@{newu}"
             elif orig.lower().startswith("t.me/"):
                 replacement = f"t.me/{newu}"
             else:
-                # any http(s) variant -> use https://t.me/
                 replacement = f"https://t.me/{newu}"
             result.append(replacement)
         else:
-            # যদি নতুন না থাকে, আগের টুকু রেখে দিন
             result.append(orig)
-
         last_idx = end
-
     result.append(text[last_idx:])
     return "".join(result)
 
-# ========== Pyrogram bot ==========
+# Pyrogram বট
 app = Client("rs_updater_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
+@app.on_message(filters.command("start") & filters.private)
+async def start(client, message):
+    await message.reply_text(
+        """🤖 Welcome to HINDI ANIME CHANNEL BOT
+
+        ✅ How to use:
+        1. First set your usernames: /set_rs username1 username2 username3
+        2. Then COPY-PASTE (not forward) any message here
+        3. For batch update in channel: /batch_update @channelusername 50 (last 50 messages)
+
+        ❌ DON'T FORWARD MESSAGES
+        ✅ COPY-PASTE INSTEAD"""
+    )
+
 @app.on_message(filters.command("set_rs") & filters.private)
-async def cmd_set_rs(client, message):
-    """
-    ব্যবহার: /set_rs username1 username2 username3
-    (username গুলো @ ছাড়া বা টেলিগ্রাম লিংক আকারেও দিতে পারবেন)
-    """
+async def set_rs(client, message):
     global RS_USERNAMES
     args = message.text.split()[1:]
     if not args or len(args) > 3:
@@ -89,67 +86,40 @@ async def cmd_set_rs(client, message):
     await message.reply_text(f"✅ RS set: @{RS_USERNAMES[0]} | @{RS_USERNAMES[1]} | @{RS_USERNAMES[2]}")
 
 @app.on_message(filters.command("batch_update") & filters.private)
-async def cmd_batch_update(client, message):
-    """
-    Usage: /batch_update @channelusername 50
-    - Bot must be admin in the channel with edit rights.
-    - This will scan the latest N messages and try to edit them in-place.
-    """
+async def batch_update(client, message):
+    global RS_USERNAMES
     if not RS_USERNAMES[0]:
         await message.reply_text("❌ Please set RS usernames first with /set_rs")
         return
-
     parts = message.text.split()
     if len(parts) < 3:
         await message.reply_text("Usage: /batch_update @channelusername message_count (e.g., /batch_update @chan 50)")
         return
-
     channel = parts[1].lstrip("@")
     try:
         total_count = int(parts[2])
     except ValueError:
         await message.reply_text("❌ message_count must be a number.")
         return
-
     if total_count > 5000:
-        await message.reply_text("❌ Too many messages at once. Try <= 5000 (or run multiple batches).")
+        await message.reply_text("❌ Too many messages at once. Try <= 5000.")
         return
-
-    await message.reply_text(f"🔄 Starting: scanning last {total_count} messages in @{channel} ...")
-
-    # --- check admin & permissions ---
+    await message.reply_text(f"🔄 Starting: scanning last {total_count} messages in @{channel}...")
     try:
         me = await client.get_me()
         member = await client.get_chat_member(channel, me.id)
-        if member.status not in ("administrator", "creator"):
-            await message.reply_text("❌ Bot is not an admin in that channel. Make the bot admin with edit rights.")
+        if member.status not in ("administrator", "creator") or not member.privileges.can_edit_messages:
+            await message.reply_text("❌ Bot must be admin with edit rights.")
             return
-        # check privileges (Pyrogram keeps admin privileges under .privileges)
-        if hasattr(member, "privileges") and member.privileges:
-            if getattr(member.privileges, "can_edit_messages", None) is False:
-                await message.reply_text("❌ Bot admin does not have can_edit_messages permission. Enable it.")
-                return
-    except RPCError as e:
-        await message.reply_text(f"❌ Failed to check admin status: {e}")
-        return
-
-    processed = 0
-    edited = 0
-    skipped = 0
-
-    try:
-        # Pyrogram get_chat_history returns latest -> older; limit=total_count
+        processed = 0
+        edited = 0
         async for msg in client.get_chat_history(channel, limit=total_count):
             processed += 1
             old_text = msg.text or msg.caption or ""
             if not old_text or not old_text.strip():
-                skipped += 1
                 continue
-
             new_text = replace_all_usernames(old_text, RS_USERNAMES)
-            if new_text == old_text:
-                skipped += 1
-            else:
+            if new_text != old_text:
                 try:
                     if msg.text:
                         await client.edit_message_text(chat_id=channel, message_id=msg.message_id, text=new_text)
@@ -157,25 +127,28 @@ async def cmd_batch_update(client, message):
                         await client.edit_message_caption(chat_id=channel, message_id=msg.message_id, caption=new_text)
                     edited += 1
                 except FloodWait as fw:
-                    # server asked to wait
-                    logger.warning(f"FloodWait {fw.x}s — sleeping")
                     await asyncio.sleep(fw.x + 1)
-                    # after sleep, we can retry once (optional)
-                except RPCError as rpc_e:
-                    logger.error(f"RPC error editing msg {msg.message_id}: {rpc_e}")
-            # light delay to avoid flood limits
-            await asyncio.sleep(0.7)
-            # progress message occasionally
+                except RPCError as e:
+                    logger.error(f"Edit error: {e}")
+            await asyncio.sleep(0.5)  # দ্রুত কাজের জন্য কম ডিলে
             if processed % 50 == 0:
-                await message.reply_text(f"Progress: processed {processed}/{total_count}, edited {edited} so far...")
-
-            if processed >= total_count:
-                break
-
-        await message.reply_text(f"✅ Done. Processed: {processed}, Edited: {edited}, Skipped: {skipped}")
+                await message.reply_text(f"Progress: {processed}/{total_count}, edited {edited}")
+        await message.reply_text(f"✅ Done. Processed: {processed}, Edited: {edited}")
     except Exception as e:
         logger.exception("Batch update failed")
-        await message.reply_text(f"❌ Batch update failed: {e}")
+        await message.reply_text(f"❌ Failed: {e}")
+
+@app.on_message(filters.text & filters.private)
+async def process_message(client, message):
+    if message.forward_date:
+        await message.reply_text("❌ Don't forward, COPY-PASTE instead! Use /start")
+        return
+    text = message.text or message.caption or ""
+    if not RS_USERNAMES[0] or not text.strip():
+        return
+    new_text = replace_all_usernames(text, RS_USERNAMES)
+    if new_text != text:
+        await message.reply_text(new_text)
 
 if __name__ == "__main__":
     print("Bot is starting...")
