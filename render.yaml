@@ -1,10 +1,9 @@
 services:
-  - type: worker
-    name: rs-bot
+  - type: web
+    name: telegram-anime-bot
     env: python
-    plan: free
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "python bot.py"
+    startCommand: "python main.py"
     envVars:
       - key: API_ID
         sync: false
@@ -12,3 +11,5 @@ services:
         sync: false
       - key: BOT_TOKEN
         sync: false
+      - key: CHANNEL
+        value: "CARTOONFUNNY03"
