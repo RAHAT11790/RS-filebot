@@ -91,7 +91,7 @@ def extract_anime_info(text: str, buttons=None):
 # --- Historical fetch ---
 async def fetch_history():
     async with Client("anime-bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN) as app_client:
-        async for msg in app_client.get_chat_history(CHANNEL, reverse=False):
+        async for msg in app_client.get_chat_history(CHANNEL):
             text = msg.text or msg.caption or ""
             buttons = msg.reply_markup.inline_keyboard if msg.reply_markup else None
             name, link = extract_anime_info(text, buttons)
