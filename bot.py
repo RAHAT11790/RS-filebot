@@ -1,17 +1,14 @@
 import os
+import sqlite3
 from fastapi import FastAPI, Request
 from telegram import Update, Bot
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, Dispatcher
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHANNEL_ID = int(os.environ.get("CHANNEL_ID"))  # চ্যানেল ID
+CHANNEL_ID = int(os.environ.get("CHANNEL_ID"))
 PORT = int(os.environ.get("PORT", 8000))
 
-# ------------------------
-# Global Variables
-# ------------------------
-KEYWORDS_DB = {}          # চ্যানেল থেকে আসা কিওয়ার্ড
-KEYWORD_ACTIVE = True     # /stop_all_key এর জন্য
+KEYWORD_ACTIVE = True
 WELCOME_MESSAGE = "স্বাগতম!"
 CLEAN_SERVICE = True
 BLOCKS = {"photo": True, "video": True, "link": True, "forward": True}
@@ -19,6 +16,25 @@ BLOCKS = {"photo": True, "video": True, "link": True, "forward": True}
 bot = Bot(BOT_TOKEN)
 app = FastAPI()
 dispatcher = Dispatcher(bot=bot, update_queue=None, use_context=True)
+
+# ------------------------
+# Database Setup
+# ------------------------
+conn = sqlite3.connect("keywords.db", check_same_thread=False)
+cursor = conn.cursor()
+cursor.execute("""CREATE TABLE IF NOT EXISTS keywords (
+                    keyword TEXT PRIMARY KEY,
+                    reply TEXT
+                )""")
+conn.commit()
+
+def save_keyword(keyword, reply):
+    cursor.execute("INSERT OR IGNORE INTO keywords (keyword, reply) VALUES (?, ?)", (keyword.lower(), reply))
+    conn.commit()
+
+def get_keywords():
+    cursor.execute("SELECT keyword, reply FROM keywords")
+    return cursor.fetchall()
 
 # ------------------------
 # Admin Check
@@ -64,17 +80,18 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if msg.forward_from_chat and msg.forward_from_chat.id == CHANNEL_ID:
         text = msg.text or msg.caption
         if text:
-            KEYWORDS_DB[text.lower()] = text
+            save_keyword(text, text)
             print(f"New keyword saved: {text}")
 
 # ------------------------
 # Check Keywords in Group
 # ------------------------
 async def check_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global KEYWORD_ACTIVE
     if not KEYWORD_ACTIVE:
         return
     text = update.message.text.lower()
-    for keyword, reply in KEYWORDS_DB.items():
+    for keyword, reply in get_keywords():
         if keyword in text:
             await update.message.reply_text(reply)
 
