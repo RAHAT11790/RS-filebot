@@ -1,10 +1,13 @@
 import os
+import requests
 from flask import Flask, request
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 import config
 
+# ===========================
 # Pyrogram Bot
+# ===========================
 bot = Client(
     "group_helper_bot",
     api_id=config.API_ID,
@@ -13,11 +16,13 @@ bot = Client(
     in_memory=True
 )
 
+# ===========================
 # Flask Server
+# ===========================
 server = Flask(__name__)
 
 # ===========================
-# Storage (Demo DB)
+# Storage
 # ===========================
 GROUP_WELCOME = {}
 GROUP_WELCOME_PHOTO = {}
@@ -28,7 +33,14 @@ CLEAN_SERVICE = {}
 BANNED_CONTENT = {}
 
 # ===========================
-# START Command
+# Utility: Check Admin
+# ===========================
+async def is_admin(message: Message):
+    member = await bot.get_chat_member(message.chat.id, message.from_user.id)
+    return member.status in ["administrator", "creator"]
+
+# ===========================
+# /start Command
 # ===========================
 @bot.on_message(filters.command("start"))
 async def start_command(client, message: Message):
@@ -186,13 +198,6 @@ async def auto_ban(client, message: Message):
                 await bot.kick_chat_member(chat_id, message.from_user.id)
 
 # ===========================
-# Utility: Check Admin
-# ===========================
-async def is_admin(message: Message):
-    member = await bot.get_chat_member(message.chat.id, message.from_user.id)
-    return member.status in ["administrator", "creator"]
-
-# ===========================
 # Flask Webhook
 # ===========================
 @server.route("/webhook", methods=["POST"])
@@ -201,11 +206,20 @@ def webhook():
     bot.process_update(update)
     return "OK", 200
 
+@server.route("/health", methods=["GET"])
+def health():
+    return "OK", 200
+
 # ===========================
 # Main
 # ===========================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     bot.start()
-    bot.set_webhook(config.WEBHOOK_URL)
+
+    # Set webhook using Telegram API
+    resp = requests.get(f"https://api.telegram.org/bot{config.BOT_TOKEN}/setWebhook",
+                        params={"url": config.WEBHOOK_URL})
+    print("Webhook Set:", resp.json())
+
     server.run(host="0.0.0.0", port=port)
