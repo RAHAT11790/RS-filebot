@@ -19,7 +19,6 @@ DB_FILE = "posts.db"
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
-    # posts table
     cur.execute("""
         CREATE TABLE IF NOT EXISTS posts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -28,7 +27,6 @@ def init_db():
             UNIQUE(anime_name, link)
         )
     """)
-    # history table
     cur.execute("""
         CREATE TABLE IF NOT EXISTS history (
             anime_name TEXT PRIMARY KEY,
@@ -47,6 +45,13 @@ API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL = os.getenv("CHANNEL")  # e.g. "CARTOONFUNNY03"
 
+# --------- এখানে user session অ্যাড করছি -----------
+# ফোন নম্বর দিয়ে লগইন করতে হলে প্রথমে একবার লোকালি চালাতে হবে:
+# python script.py
+# তখন তোমাকে ফোন নাম্বার, কোড, পাসওয়ার্ড চাইবে এবং session ফাইল তৈরি হবে।
+user = Client("user-session", api_id=API_ID, api_hash=API_HASH)
+
+# Bot Client আলাদা থাকবে
 bot = Client("anime-bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # --- Utility functions ---
@@ -92,8 +97,8 @@ def extract_anime_info(text: str, buttons=None):
 # --- Historical fetch with flood handling ---
 async def fetch_history():
     try:
-        async with Client("anime-bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, takeout=True) as app_client:
-            async for msg in app_client.get_chat_history(CHANNEL):
+        async with user:  # <<<<<< এখন user account দিয়ে history আনবে
+            async for msg in user.get_chat_history(CHANNEL):
                 text = msg.text or msg.caption or ""
                 buttons = msg.reply_markup.inline_keyboard if msg.reply_markup else None
                 name, link = extract_anime_info(text, buttons)
@@ -102,7 +107,7 @@ async def fetch_history():
     except FloodWait as e:
         print(f"FloodWait: Waiting {e.value} seconds...")
         await asyncio.sleep(e.value)
-        await fetch_history()  # Retry after wait
+        await fetch_history()
 
 # --- Listener for new posts ---
 @bot.on_message(filters.chat(CHANNEL))
@@ -127,7 +132,7 @@ async def start_cmd(client, message):
     )
     await message.reply_text(text)
 
-# --- /fetch command for manual history fetch ---
+# --- /fetch command ---
 @bot.on_message(filters.command("fetch") & filters.private)
 async def fetch_cmd(client, message):
     await message.reply_text("হিস্টোরি ফেচ শুরু হচ্ছে... (এতে সময় লাগতে পারে)")
@@ -139,7 +144,6 @@ async def fetch_cmd(client, message):
 async def list_cmd(client, message):
     text_parts = message.text.split()
     if len(text_parts) > 1 and text_parts[1].lower() == "history":
-        # Show history
         conn = sqlite3.connect(DB_FILE)
         cur = conn.cursor()
         cur.execute("SELECT anime_name, link FROM history ORDER BY first_seen ASC")
@@ -152,7 +156,6 @@ async def list_cmd(client, message):
         await message.reply_text("\n".join(text_lines), parse_mode="Markdown", disable_web_page_preview=True)
         return
 
-    # Normal list pagination
     try:
         offset = int(text_parts[1])
     except:
@@ -164,14 +167,13 @@ async def list_cmd(client, message):
     rows = cur.fetchall()
     conn.close()
 
-    # Filter duplicates: keep first link per anime_name
     seen = set()
     filtered = []
     for name, link in rows:
         if name not in seen:
             filtered.append((name, link))
             seen.add(name)
-            save_history(name, link)  # save to history
+            save_history(name, link)
 
     page = filtered[offset: offset + 50]
     if not page:
@@ -183,12 +185,9 @@ async def list_cmd(client, message):
 
 # --- Run Flask + Bot ---
 if __name__ == "__main__":
-    # NO historical fetch at startup to avoid flood
-    # Start Flask in a thread
     def run_flask():
         port = int(os.environ.get("PORT", 5000))
         app.run(host="0.0.0.0", port=port)
     threading.Thread(target=run_flask).start()
 
-    # Run bot
     bot.run()
