@@ -1,4 +1,3 @@
-# app.py
 import gradio as gr
 import os
 import tempfile
@@ -7,7 +6,7 @@ from transformers import MarianMTModel, MarianTokenizer
 from TTS.api import TTS
 import moviepy.editor as mp
 
-# Models
+# Load models once
 whisper_model = whisper.load_model("small")
 tokenizer = MarianTokenizer.from_pretrained("Helsinki-NLP/opus-mt-ja-hi")
 trans_model = MarianMTModel.from_pretrained("Helsinki-NLP/opus-mt-ja-hi")
