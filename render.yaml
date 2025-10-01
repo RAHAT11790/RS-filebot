@@ -1,16 +1,6 @@
-services:
-  - type: web
-    name: anime-bot  # আপনার সার্ভিসের নাম পরিবর্তন করুন
-    env: python
-    plan: free  # ফ্রি প্ল্যান, প্রয়োজনে starter-এ আপগ্রেড করুন
-    buildCommand: pip install -r requirements.txt
-    startCommand: python bot.py  # আপনার মেইন ফাইলের নাম (যদি bot.py হয়)
-    envVars:
-      - key: API_ID
-        sync: false  # সিক্রেট ভ্যালু, Render ড্যাশবোর্ডে সেট করুন
-      - key: API_HASH
-        sync: false
-      - key: BOT_TOKEN
-        sync: false
-      - key: CHANNEL
-        sync: false
+import os
+
+API_ID = int(os.getenv("API_ID"))        # টেলিগ্রাম থেকে পাওয়া
+API_HASH = os.getenv("API_HASH")         # টেলিগ্রাম থেকে পাওয়া
+BOT_TOKEN = os.getenv("BOT_TOKEN")       # BotFather থেকে পাওয়া
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")   # Render domain, যেমন: https://mybot.onrender.com/webhook
