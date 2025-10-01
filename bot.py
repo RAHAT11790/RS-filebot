@@ -1,140 +1,65 @@
+# app.py
+import gradio as gr
 import os
-import sqlite3
-from fastapi import FastAPI, Request
-from telegram import Update, Bot
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, Dispatcher
+import tempfile
+import whisper
+from transformers import MarianMTModel, MarianTokenizer
+from TTS.api import TTS
+import moviepy.editor as mp
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHANNEL_ID = int(os.environ.get("CHANNEL_ID"))
-PORT = int(os.environ.get("PORT", 8000))
+# Models
+whisper_model = whisper.load_model("small")
+tokenizer = MarianTokenizer.from_pretrained("Helsinki-NLP/opus-mt-ja-hi")
+trans_model = MarianMTModel.from_pretrained("Helsinki-NLP/opus-mt-ja-hi")
+tts = TTS("tts_models/multilingual/multi-dataset/hi")
 
-KEYWORD_ACTIVE = True
-WELCOME_MESSAGE = "স্বাগতম!"
-CLEAN_SERVICE = True
-BLOCKS = {"photo": True, "video": True, "link": True, "forward": True}
+SEGMENT_LENGTH = 120  # seconds per segment
 
-bot = Bot(BOT_TOKEN)
-app = FastAPI()
-dispatcher = Dispatcher(bot=bot, update_queue=None, use_context=True)
+def dub_long_video(video_file):
+    if video_file is None:
+        return None
+    workdir = tempfile.mkdtemp(prefix="dub_")
+    input_path = video_file.name if hasattr(video_file, "name") else video_file
+    video = mp.VideoFileClip(input_path)
+    total_duration = int(video.duration)
+    dubbed_segments = []
+    start = 0
+    idx = 1
+    while start < total_duration:
+        end = min(start + SEGMENT_LENGTH, total_duration)
+        segment_path = os.path.join(workdir, f"segment_{idx}.mp4")
+        video.subclip(start, end).write_videofile(segment_path, codec="libx264", audio_codec="aac", verbose=False, logger=None)
+        clip_seg = mp.VideoFileClip(segment_path)
+        audio_path = os.path.join(workdir, f"audio_{idx}.wav")
+        clip_seg.audio.write_audiofile(audio_path, verbose=False, logger=None)
+        res = whisper_model.transcribe(audio_path, language="ja")
+        jp_text = res.get("text", "")
+        translated = trans_model.generate(**tokenizer([jp_text], return_tensors="pt", padding=True))
+        hi_text = tokenizer.decode(translated[0], skip_special_tokens=True)
+        tts_path = os.path.join(workdir, f"hindi_audio_{idx}.wav")
+        tts.tts_to_file(text=hi_text, file_path=tts_path)
+        final_seg = clip_seg.set_audio(mp.AudioFileClip(tts_path))
+        final_seg_path = os.path.join(workdir, f"dubbed_segment_{idx}.mp4")
+        final_seg.write_videofile(final_seg_path, codec="libx264", audio_codec="aac", verbose=False, logger=None)
+        dubbed_segments.append(final_seg_path)
+        idx += 1
+        start += SEGMENT_LENGTH
+    concat_file = os.path.join(workdir, "segments_list.txt")
+    with open(concat_file, "w") as f:
+        for seg in dubbed_segments:
+            f.write(f"file '{seg}'\n")
+    output_path = os.path.join(workdir, "final_dubbed_video.mp4")
+    os.system(f"ffmpeg -f concat -safe 0 -i {concat_file} -c copy {output_path}")
+    return output_path
 
-# ------------------------
-# Database Setup
-# ------------------------
-conn = sqlite3.connect("keywords.db", check_same_thread=False)
-cursor = conn.cursor()
-cursor.execute("""CREATE TABLE IF NOT EXISTS keywords (
-                    keyword TEXT PRIMARY KEY,
-                    reply TEXT
-                )""")
-conn.commit()
+demo = gr.Interface(
+    fn=dub_long_video,
+    inputs=gr.Video(label="Upload Japanese Video"),
+    outputs=gr.Video(label="Hindi Dubbed Video"),
+    title="Anime Hindi Dubbing App",
+    description="Upload Japanese anime video. Segment-wise dubbing, Hindi TTS generated. Mobile-friendly UI.",
+    allow_flagging="never"
+)
 
-def save_keyword(keyword, reply):
-    cursor.execute("INSERT OR IGNORE INTO keywords (keyword, reply) VALUES (?, ?)", (keyword.lower(), reply))
-    conn.commit()
-
-def get_keywords():
-    cursor.execute("SELECT keyword, reply FROM keywords")
-    return cursor.fetchall()
-
-# ------------------------
-# Admin Check
-# ------------------------
-async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    chat = update.effective_chat
-    member = await context.bot.get_chat_member(chat.id, user.id)
-    return member.status in ["administrator", "creator"]
-
-# ------------------------
-# /stop_all_key Command
-# ------------------------
-async def stop_all_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global KEYWORD_ACTIVE
-    if not await is_admin(update, context):
-        await update.message.reply_text("শুধুমাত্র অ্যাডমিন ব্যবহার করতে পারবে।")
-        return
-    KEYWORD_ACTIVE = False
-    await update.message.reply_text("কিওয়ার্ড সিস্টেম বন্ধ করা হলো। সব কিওয়ার্ড অক্ষুণ্ণ থাকবে।")
-
-# ------------------------
-# Welcome / Leave
-# ------------------------
-async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    for member in update.message.new_chat_members:
-        msg = await update.message.reply_text(f"{member.full_name}, {WELCOME_MESSAGE}")
-        if CLEAN_SERVICE:
-            await msg.delete(delay=5)
-
-async def leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if CLEAN_SERVICE:
-        await update.message.delete(delay=5)
-
-# ------------------------
-# Channel Post Handler
-# ------------------------
-async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global KEYWORD_ACTIVE
-    if not KEYWORD_ACTIVE:
-        return
-    msg = update.message
-    if msg.forward_from_chat and msg.forward_from_chat.id == CHANNEL_ID:
-        text = msg.text or msg.caption
-        if text:
-            save_keyword(text, text)
-            print(f"New keyword saved: {text}")
-
-# ------------------------
-# Check Keywords in Group
-# ------------------------
-async def check_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global KEYWORD_ACTIVE
-    if not KEYWORD_ACTIVE:
-        return
-    text = update.message.text.lower()
-    for keyword, reply in get_keywords():
-        if keyword in text:
-            await update.message.reply_text(reply)
-
-# ------------------------
-# Block Messages
-# ------------------------
-async def block_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if msg.photo and BLOCKS.get("photo"):
-        await msg.delete()
-    if msg.video and BLOCKS.get("video"):
-        await msg.delete()
-    if msg.forward_from_chat and BLOCKS.get("forward"):
-        await msg.delete()
-    if msg.entities and any(e.type == "url" for e in msg.entities) and BLOCKS.get("link"):
-        await msg.delete()
-
-# ------------------------
-# /help Command
-# ------------------------
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update, context):
-        await update.message.reply_text("শুধুমাত্র অ্যাডমিন ব্যবহার করতে পারবে।")
-        return
-    await update.message.reply_text("অ্যাডমিন কমান্ড: /stop_all_key, /help")
-
-# ------------------------
-# Dispatcher Handlers
-# ------------------------
-dispatcher.add_handler(CommandHandler("help", help_command))
-dispatcher.add_handler(CommandHandler("stop_all_key", stop_all_key))
-dispatcher.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
-dispatcher.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, leave))
-dispatcher.add_handler(MessageHandler(filters.ALL, channel_post_handler))
-dispatcher.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), check_keywords))
-dispatcher.add_handler(MessageHandler(filters.ALL, block_messages))
-
-# ------------------------
-# Telegram Webhook
-# ------------------------
-@app.post(f"/webhook/{BOT_TOKEN}")
-async def telegram_webhook(req: Request):
-    data = await req.json()
-    update = Update.de_json(data, bot)
-    await dispatcher.process_update(update)
-    return {"status": "ok"}
+if __name__ == "__main__":
+    demo.launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)))
