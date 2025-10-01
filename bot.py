@@ -1,225 +1,123 @@
 import os
-import requests
-from flask import Flask, request
-from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
-import config
+from fastapi import FastAPI, Request
+from telegram import Update, Bot
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, Dispatcher
 
-# ===========================
-# Pyrogram Bot
-# ===========================
-bot = Client(
-    "group_helper_bot",
-    api_id=config.API_ID,
-    api_hash=config.API_HASH,
-    bot_token=config.BOT_TOKEN,
-    in_memory=True
-)
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+CHANNEL_ID = int(os.environ.get("CHANNEL_ID"))  # চ্যানেল ID
+PORT = int(os.environ.get("PORT", 8000))
 
-# ===========================
-# Flask Server
-# ===========================
-server = Flask(__name__)
+# ------------------------
+# Global Variables
+# ------------------------
+KEYWORDS_DB = {}          # চ্যানেল থেকে আসা কিওয়ার্ড
+KEYWORD_ACTIVE = True     # /stop_all_key এর জন্য
+WELCOME_MESSAGE = "স্বাগতম!"
+CLEAN_SERVICE = True
+BLOCKS = {"photo": True, "video": True, "link": True, "forward": True}
 
-# ===========================
-# Storage
-# ===========================
-GROUP_WELCOME = {}
-GROUP_WELCOME_PHOTO = {}
-GROUP_LEAVE = {}
-GROUP_RULES = {}
-GROUP_FILTERS = {}
-CLEAN_SERVICE = {}
-BANNED_CONTENT = {}
+bot = Bot(BOT_TOKEN)
+app = FastAPI()
+dispatcher = Dispatcher(bot=bot, update_queue=None, use_context=True)
 
-# ===========================
-# Utility: Check Admin
-# ===========================
-async def is_admin(message: Message):
-    member = await bot.get_chat_member(message.chat.id, message.from_user.id)
+# ------------------------
+# Admin Check
+# ------------------------
+async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chat = update.effective_chat
+    member = await context.bot.get_chat_member(chat.id, user.id)
     return member.status in ["administrator", "creator"]
 
-# ===========================
-# /start Command
-# ===========================
-@bot.on_message(filters.command("start"))
-async def start_command(client, message: Message):
-    me = await bot.get_me()
-    buttons = [
-        [InlineKeyboardButton("➕ Add me to your group", url=f"https://t.me/{me.username}?startgroup=true")]
-    ]
-    await message.reply_text(
-        f"**🤖 {me.first_name} is Online!**\n\n"
-        "📌 Available Commands:\n"
-        "`/rs` - Add keyword filters\n"
-        "`/setwelcome` - Set welcome message\n"
-        "`/setwelcome_photo` - Set welcome photo\n"
-        "`/setleave` - Set leave message\n"
-        "`/rules` - Show rules\n"
-        "`/setrules` - Set rules\n"
-        "`/cleanservice all` - Auto clean join/leave messages\n"
-        "`/ban` - Ban user/content\n\n"
-        "⚠️ Only admins can use these commands.",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
+# ------------------------
+# /stop_all_key Command
+# ------------------------
+async def stop_all_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global KEYWORD_ACTIVE
+    if not await is_admin(update, context):
+        await update.message.reply_text("শুধুমাত্র অ্যাডমিন ব্যবহার করতে পারবে।")
+        return
+    KEYWORD_ACTIVE = False
+    await update.message.reply_text("কিওয়ার্ড সিস্টেম বন্ধ করা হলো। সব কিওয়ার্ড অক্ষুণ্ণ থাকবে।")
 
-# ===========================
+# ------------------------
 # Welcome / Leave
-# ===========================
-@bot.on_message(filters.new_chat_members)
-async def welcome(client, message: Message):
-    chat_id = message.chat.id
-    if chat_id in GROUP_WELCOME:
-        text = GROUP_WELCOME[chat_id].replace("{mention}", message.from_user.mention).replace("{group}", message.chat.title)
-        if chat_id in GROUP_WELCOME_PHOTO:
-            await message.reply_photo(GROUP_WELCOME_PHOTO[chat_id], caption=text)
-        else:
-            await message.reply_text(text)
+# ------------------------
+async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    for member in update.message.new_chat_members:
+        msg = await update.message.reply_text(f"{member.full_name}, {WELCOME_MESSAGE}")
+        if CLEAN_SERVICE:
+            await msg.delete(delay=5)
 
-@bot.on_message(filters.left_chat_member)
-async def leave(client, message: Message):
-    chat_id = message.chat.id
-    if chat_id in GROUP_LEAVE:
-        text = GROUP_LEAVE[chat_id].replace("{mention}", message.left_chat_member.mention).replace("{group}", message.chat.title)
-        await message.reply_text(text)
+async def leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if CLEAN_SERVICE:
+        await update.message.delete(delay=5)
 
-@bot.on_message(filters.command("setwelcome") & filters.group)
-async def set_welcome(client, message: Message):
-    if not await is_admin(message): return await message.reply_text("⚠️ Only admins can set welcome message.")
-    text = message.text.split(" ", 1)
-    if len(text) < 2: return await message.reply_text("Usage: /setwelcome [text]")
-    GROUP_WELCOME[message.chat.id] = text[1]
-    await message.reply_text("✅ Welcome message updated!")
+# ------------------------
+# Channel Post Handler
+# ------------------------
+async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global KEYWORD_ACTIVE
+    if not KEYWORD_ACTIVE:
+        return
+    msg = update.message
+    if msg.forward_from_chat and msg.forward_from_chat.id == CHANNEL_ID:
+        text = msg.text or msg.caption
+        if text:
+            KEYWORDS_DB[text.lower()] = text
+            print(f"New keyword saved: {text}")
 
-@bot.on_message(filters.command("setwelcome_photo") & filters.reply & filters.group)
-async def set_welcome_photo(client, message: Message):
-    if not await is_admin(message): return await message.reply_text("⚠️ Only admins can set welcome photo.")
-    if message.reply_to_message.photo:
-        file_id = message.reply_to_message.photo.file_id
-        GROUP_WELCOME_PHOTO[message.chat.id] = file_id
-        await message.reply_text("✅ Welcome photo updated!")
+# ------------------------
+# Check Keywords in Group
+# ------------------------
+async def check_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not KEYWORD_ACTIVE:
+        return
+    text = update.message.text.lower()
+    for keyword, reply in KEYWORDS_DB.items():
+        if keyword in text:
+            await update.message.reply_text(reply)
 
-@bot.on_message(filters.command("setleave") & filters.group)
-async def set_leave(client, message: Message):
-    if not await is_admin(message): return await message.reply_text("⚠️ Only admins can set leave message.")
-    text = message.text.split(" ", 1)
-    if len(text) < 2: return await message.reply_text("Usage: /setleave [text]")
-    GROUP_LEAVE[message.chat.id] = text[1]
-    await message.reply_text("✅ Leave message updated!")
+# ------------------------
+# Block Messages
+# ------------------------
+async def block_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if msg.photo and BLOCKS.get("photo"):
+        await msg.delete()
+    if msg.video and BLOCKS.get("video"):
+        await msg.delete()
+    if msg.forward_from_chat and BLOCKS.get("forward"):
+        await msg.delete()
+    if msg.entities and any(e.type == "url" for e in msg.entities) and BLOCKS.get("link"):
+        await msg.delete()
 
-# ===========================
-# Rules
-# ===========================
-@bot.on_message(filters.command("rules") & filters.group)
-async def rules(client, message: Message):
-    if message.chat.id in GROUP_RULES:
-        await message.reply_text(f"📌 Rules:\n\n{GROUP_RULES[message.chat.id]}")
-    else:
-        await message.reply_text("❌ No rules set yet.")
+# ------------------------
+# /help Command
+# ------------------------
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
+        await update.message.reply_text("শুধুমাত্র অ্যাডমিন ব্যবহার করতে পারবে।")
+        return
+    await update.message.reply_text("অ্যাডমিন কমান্ড: /stop_all_key, /help")
 
-@bot.on_message(filters.command("setrules") & filters.group)
-async def set_rules(client, message: Message):
-    if not await is_admin(message): return await message.reply_text("⚠️ Only admins can set rules.")
-    text = message.text.split(" ", 1)
-    if len(text) < 2: return await message.reply_text("Usage: /setrules [rules]")
-    GROUP_RULES[message.chat.id] = text[1]
-    await message.reply_text("✅ Rules updated!")
+# ------------------------
+# Dispatcher Handlers
+# ------------------------
+dispatcher.add_handler(CommandHandler("help", help_command))
+dispatcher.add_handler(CommandHandler("stop_all_key", stop_all_key))
+dispatcher.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
+dispatcher.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, leave))
+dispatcher.add_handler(MessageHandler(filters.ALL, channel_post_handler))
+dispatcher.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), check_keywords))
+dispatcher.add_handler(MessageHandler(filters.ALL, block_messages))
 
-# ===========================
-# Clean Service
-# ===========================
-@bot.on_message(filters.command("cleanservice") & filters.group)
-async def clean_service(client, message: Message):
-    if not await is_admin(message): return await message.reply_text("⚠️ Only admins can use this.")
-    if len(message.command) > 1 and message.command[1] == "all":
-        CLEAN_SERVICE[message.chat.id] = True
-        await message.reply_text("✅ Join/Leave messages will be deleted after 5 minutes.")
-
-@bot.on_message(filters.service, group=1)
-async def service_cleaner(client, message: Message):
-    if message.chat.id in CLEAN_SERVICE:
-        await message.delete(delay=300)
-
-# ===========================
-# Filters (/rs)
-# ===========================
-@bot.on_message(filters.command("rs") & filters.group)
-async def add_filter(client, message: Message):
-    if not await is_admin(message): return await message.reply_text("⚠️ Only admins can set filters.")
-    args = message.text.split(" ", 2)
-    if len(args) < 3: return await message.reply_text("Usage: /rs [keyword] [reply text]")
-    keyword, reply = args[1], args[2]
-    if message.chat.id not in GROUP_FILTERS:
-        GROUP_FILTERS[message.chat.id] = {}
-    GROUP_FILTERS[message.chat.id][keyword.lower()] = reply
-    await message.reply_text(f"✅ Filter added:\n**{keyword}** → {reply}")
-
-@bot.on_message(filters.text & filters.group, group=2)
-async def filter_check(client, message: Message):
-    chat_id = message.chat.id
-    if chat_id in GROUP_FILTERS:
-        for keyword, reply in GROUP_FILTERS[chat_id].items():
-            if keyword in message.text.lower():
-                await message.reply_text(reply)
-                break
-
-# ===========================
-# Ban System
-# ===========================
-@bot.on_message(filters.command("ban") & filters.group)
-async def ban_command(client, message: Message):
-    if not await is_admin(message): return await message.reply_text("⚠️ Only admins can ban.")
-    if len(message.command) < 2: return await message.reply_text("Usage: /ban [link|photo|video|username|user_id]")
-    target = message.command[1].lower()
-    BANNED_CONTENT.setdefault(message.chat.id, set()).add(target)
-    await message.reply_text(f"🚫 Banned: {target}")
-
-@bot.on_message(filters.group, group=3)
-async def auto_ban(client, message: Message):
-    chat_id = message.chat.id
-    if chat_id in BANNED_CONTENT:
-        for banned in BANNED_CONTENT[chat_id]:
-            if banned == "link" and message.entities:
-                for ent in message.entities:
-                    if ent.type in ["url", "text_link"]:
-                        await message.delete()
-                        await bot.kick_chat_member(chat_id, message.from_user.id)
-            elif banned == "photo" and message.photo:
-                await message.delete()
-                await bot.kick_chat_member(chat_id, message.from_user.id)
-            elif banned == "video" and message.video:
-                await message.delete()
-                await bot.kick_chat_member(chat_id, message.from_user.id)
-            elif banned.startswith("@") and message.from_user.username == banned.strip("@"):
-                await message.delete()
-                await bot.kick_chat_member(chat_id, message.from_user.id)
-            elif banned.isdigit() and str(message.from_user.id) == banned:
-                await message.delete()
-                await bot.kick_chat_member(chat_id, message.from_user.id)
-
-# ===========================
-# Flask Webhook
-# ===========================
-@server.route("/webhook", methods=["POST"])
-def webhook():
-    update = request.get_json(force=True)
-    bot.process_update(update)
-    return "OK", 200
-
-@server.route("/health", methods=["GET"])
-def health():
-    return "OK", 200
-
-# ===========================
-# Main
-# ===========================
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 5000))
-    bot.start()
-
-    # Set webhook using Telegram API
-    resp = requests.get(f"https://api.telegram.org/bot{config.BOT_TOKEN}/setWebhook",
-                        params={"url": config.WEBHOOK_URL})
-    print("Webhook Set:", resp.json())
-
-    server.run(host="0.0.0.0", port=port)
+# ------------------------
+# Telegram Webhook
+# ------------------------
+@app.post(f"/webhook/{BOT_TOKEN}")
+async def telegram_webhook(req: Request):
+    data = await req.json()
+    update = Update.de_json(data, bot)
+    await dispatcher.process_update(update)
+    return {"status": "ok"}
