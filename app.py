@@ -1,64 +1,167 @@
-import gradio as gr
+import telebot
+import requests
 import os
-import tempfile
-import whisper
-from transformers import MarianMTModel, MarianTokenizer
-from TTS.api import TTS
-import moviepy.editor as mp
+from flask import Flask
+from threading import Thread
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# Load models once
-whisper_model = whisper.load_model("small")
-tokenizer = MarianTokenizer.from_pretrained("Helsinki-NLP/opus-mt-ja-hi")
-trans_model = MarianMTModel.from_pretrained("Helsinki-NLP/opus-mt-ja-hi")
-tts = TTS("tts_models/multilingual/multi-dataset/hi")
+# Initialize Flask app
+app = Flask(__name__)
 
-SEGMENT_LENGTH = 120  # seconds per segment
+# Define a simple route for health check
+@app.route('/')
+def home():
+    return "Bot is running!"
 
-def dub_long_video(video_file):
-    if video_file is None:
-        return None
-    workdir = tempfile.mkdtemp(prefix="dub_")
-    input_path = video_file.name if hasattr(video_file, "name") else video_file
-    video = mp.VideoFileClip(input_path)
-    total_duration = int(video.duration)
-    dubbed_segments = []
-    start = 0
-    idx = 1
-    while start < total_duration:
-        end = min(start + SEGMENT_LENGTH, total_duration)
-        segment_path = os.path.join(workdir, f"segment_{idx}.mp4")
-        video.subclip(start, end).write_videofile(segment_path, codec="libx264", audio_codec="aac", verbose=False, logger=None)
-        clip_seg = mp.VideoFileClip(segment_path)
-        audio_path = os.path.join(workdir, f"audio_{idx}.wav")
-        clip_seg.audio.write_audiofile(audio_path, verbose=False, logger=None)
-        res = whisper_model.transcribe(audio_path, language="ja")
-        jp_text = res.get("text", "")
-        translated = trans_model.generate(**tokenizer([jp_text], return_tensors="pt", padding=True))
-        hi_text = tokenizer.decode(translated[0], skip_special_tokens=True)
-        tts_path = os.path.join(workdir, f"hindi_audio_{idx}.wav")
-        tts.tts_to_file(text=hi_text, file_path=tts_path)
-        final_seg = clip_seg.set_audio(mp.AudioFileClip(tts_path))
-        final_seg_path = os.path.join(workdir, f"dubbed_segment_{idx}.mp4")
-        final_seg.write_videofile(final_seg_path, codec="libx264", audio_codec="aac", verbose=False, logger=None)
-        dubbed_segments.append(final_seg_path)
-        idx += 1
-        start += SEGMENT_LENGTH
-    concat_file = os.path.join(workdir, "segments_list.txt")
-    with open(concat_file, "w") as f:
-        for seg in dubbed_segments:
-            f.write(f"file '{seg}'\n")
-    output_path = os.path.join(workdir, "final_dubbed_video.mp4")
-    os.system(f"ffmpeg -f concat -safe 0 -i {concat_file} -c copy {output_path}")
-    return output_path
+# Bot configuration
+BOT_TOKEN = os.environ.get("BOT_TOKEN")  # Get token from environment variable
+LIKE_API_URL = "http://free-like-giveawya-bot-seller-bd-de.vercel.app/like"
+GROUP_ID = -1002931591443  # Group ID
+GROUP_LINK = "https://t.me/rsallanime"  # Group invite link
 
-demo = gr.Interface(
-    fn=dub_long_video,
-    inputs=gr.Video(label="Upload Japanese Video"),
-    outputs=gr.Video(label="Hindi Dubbed Video"),
-    title="Anime Hindi Dubbing App",
-    description="Upload Japanese anime video. Segment-wise dubbing, Hindi TTS generated. Mobile-friendly UI.",
-    allow_flagging="never"
-)
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN environment variable not set!")
 
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
+
+# Function to create inline keyboard with group link
+def get_group_button():
+    keyboard = InlineKeyboardMarkup()
+    keyboard.add(InlineKeyboardButton("Join Our Group", url=GROUP_LINK))
+    return keyboard
+
+# Function to check if message is in allowed group
+def is_in_group(message):
+    chat_id = message.chat.id
+    return chat_id == GROUP_ID
+
+# Start command (accessible in group only)
+@bot.message_handler(commands=['start'])
+def start_cmd(message):
+    if not is_in_group(message):
+        bot.reply_to(message, "⚠️ This bot can only be used in the designated group.")
+        return
+    
+    bot.reply_to(message,
+                 "👋 Welcome!\n\n"
+                 "Send likes with:\n"
+                 "<code>/like <region> <uid></code>\n\n"
+                 "Example:\n"
+                 "<code>/like bd 123456789</code>\n\n"
+                 "Stay updated in our group:",
+                 reply_markup=get_group_button(),
+                 parse_mode="HTML")
+
+# Help command (accessible in group only)
+@bot.message_handler(commands=['help'])
+def help_cmd(message):
+    if not is_in_group(message):
+        bot.reply_to(message, "⚠️ This bot can only be used in the designated group.")
+        return
+    
+    bot.reply_to(message,
+                 "📖 <b>LikeBot Help</b>\n\n"
+                 "Use command:\n"
+                 "<code>/like <region> <uid></code>\n\n"
+                 "Example:\n"
+                 "<code>/like bd 123456789</code>\n\n"
+                 "Supported regions: bd, in, pk, id, th, sg, eu, etc.",
+                 parse_mode="HTML")
+
+# Like command (accessible in group only)
+@bot.message_handler(commands=['like'])
+def like_cmd(message):
+    if not is_in_group(message):
+        bot.reply_to(message, "⚠️ This bot can only be used in the designated group.")
+        return
+    
+    args = message.text.split()
+    if len(args) < 3:
+        bot.reply_to(message,
+                     "⚠️ Wrong usage!\n\n"
+                     "Correct format:\n"
+                     "<code>/like <region> <uid></code>",
+                     parse_mode="HTML")
+        return
+
+    region = args[1].lower()
+    uid = args[2]
+
+    try:
+        resp = requests.get(f"{LIKE_API_URL}?server_name={region}&uid={uid}", timeout=15)
+        if resp.status_code != 200:
+            bot.send_message(message.chat.id, "🚨 API not responding, please try later.")
+            return
+        data = resp.json()
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Connection Error: {e}")
+        return
+
+    status = data.get("status", 0)
+
+    if status == 1:
+        likes_given = int(data.get("LikesGivenByAPI", 0) or 0)
+        likes_before = int(data.get("LikesbeforeCommand", 0) or 0)
+        likes_after = int(data.get("LikesafterCommand", 0) or 0)
+
+        text = (
+            "✅ <b>LIKE SUCCESS</b>\n\n"
+            "👤 <b>Player:</b> {name}\n"
+            "🆔 <b>UID:</b> {uid}\n"
+            "🌍 <b>Region:</b> {region}\n\n"
+            "📊 <b>Like Report</b>\n"
+            "• Before: {before}\n"
+            "• Sent: {sent}\n"
+            "• Now: {after}\n\n"
+            "🎯 Keep supporting!"
+        ).format(
+            name=data.get("PlayerNickname", "Unknown"),
+            uid=data.get("UID", uid),
+            region=region.upper(),
+            before=likes_before,
+            sent=likes_given,
+            after=likes_after
+        )
+
+        bot.send_message(message.chat.id, text, parse_mode="HTML")
+
+    elif status == 2:
+        text = (
+            "ℹ️ <b>Already Liked</b>\n\n"
+            "👤 <b>Player:</b> {name}\n"
+            "🆔 <b>UID:</b> {uid}\n"
+            "🌍 <b>Region:</b> {region}\n\n"
+            "💖 Current Likes: {likes}\n\n"
+            "⚡ This account was already liked earlier."
+        ).format(
+            name=data.get("PlayerNickname", "Unknown"),
+            uid=data.get("UID", uid),
+            region=region.upper(),
+            likes=data.get("LikesafterCommand", "?")
+        )
+
+        bot.send_message(message.chat.id, text, parse_mode="HTML")
+
+    else:
+        text = (
+            "❌ <b>Like Failed</b>\n\n"
+            "🆔 UID: {uid}\n"
+            "🌍 Region: {region}\n\n"
+            "Please check your details and try again."
+        ).format(uid=uid, region=region.upper())
+
+        bot.send_message(message.chat.id, text, parse_mode="HTML")
+
+# Function to run the bot
+def run_bot():
+    bot.polling(none_stop=True)
+
+# Start Flask and Bot in separate threads
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)))
+    # Start bot in a separate thread
+    bot_thread = Thread(target=run_bot)
+    bot_thread.start()
+    
+    # Start Flask server
+    port = int(os.environ.get("PORT", 5000))  # Render provides PORT env variable
+    app.run(host="0.0.0.0", port=port)
