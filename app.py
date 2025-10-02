@@ -1,167 +1,270 @@
-import telebot
+from flask import Flask, request, jsonify
+import asyncio
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad
+from google.protobuf.json_format import MessageToJson
+import binascii
+import aiohttp
 import requests
-import os
-from flask import Flask
-from threading import Thread
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+import json
+import like_pb2
+import like_count_pb2
+import uid_generator_pb2
+from google.protobuf.message import DecodeError
 
-# Initialize Flask app
 app = Flask(__name__)
 
-# Define a simple route for health check
-@app.route('/')
-def home():
-    return "Bot is running!"
+def load_tokens(server_name):
+    try:
+        if server_name == "IND":
+            with open("token_ind.json", "r") as f:
+                tokens = json.load(f)
+        elif server_name in {"BR", "US", "SAC", "NA"}:
+            with open("token_br.json", "r") as f:
+                tokens = json.load(f)
+        else:
+            with open("token_bd.json", "r") as f:
+                tokens = json.load(f)
+        return tokens
+    except Exception as e:
+        app.logger.error(f"Error loading tokens for server {server_name}: {e}")
+        return None
 
-# Bot configuration
-BOT_TOKEN = os.environ.get("BOT_TOKEN")  # Get token from environment variable
-LIKE_API_URL = "https://api-likes-alli-ff.vercel.app/like?uid=760840390"
-GROUP_ID = -1002931591443  # Group ID
-GROUP_LINK = "https://t.me/rsallanime"  # Group invite link
+def encrypt_message(plaintext):
+    try:
+        key = b'Yg&tc%DEuh6%Zc^8'
+        iv = b'6oyZDr22E3ychjM%'
+        cipher = AES.new(key, AES.MODE_CBC, iv)
+        padded_message = pad(plaintext, AES.block_size)
+        encrypted_message = cipher.encrypt(padded_message)
+        return binascii.hexlify(encrypted_message).decode('utf-8')
+    except Exception as e:
+        app.logger.error(f"Error encrypting message: {e}")
+        return None
 
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN environment variable not set!")
+def create_protobuf_message(user_id, region):
+    try:
+        message = like_pb2.like()
+        message.uid = int(user_id)
+        message.region = region
+        return message.SerializeToString()
+    except Exception as e:
+        app.logger.error(f"Error creating protobuf message: {e}")
+        return None
 
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
+async def send_request(encrypted_uid, token, url):
+    try:
+        edata = bytes.fromhex(encrypted_uid)
+        headers = {
+            'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)",
+            'Connection': "Keep-Alive",
+            'Accept-Encoding': "gzip",
+            'Authorization': f"Bearer {token}",
+            'Content-Type': "application/x-www-form-urlencoded",
+            'Expect': "100-continue",
+            'X-Unity-Version': "2018.4.11f1",
+            'X-GA': "v1 1",
+            'ReleaseVersion': "OB50"
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=edata, headers=headers) as response:
+                if response.status != 200:
+                    app.logger.error(f"Request failed with status code: {response.status}")
+                    return response.status
+                return await response.text()
+    except Exception as e:
+        app.logger.error(f"Exception in send_request: {e}")
+        return None
 
-# Function to create inline keyboard with group link
-def get_group_button():
-    keyboard = InlineKeyboardMarkup()
-    keyboard.add(InlineKeyboardButton("Join Our Group", url=GROUP_LINK))
-    return keyboard
+async def send_multiple_requests(uid, server_name, url):
+    try:
+        region = server_name
+        protobuf_message = create_protobuf_message(uid, region)
+        if protobuf_message is None:
+            app.logger.error("Failed to create protobuf message.")
+            return None
+        encrypted_uid = encrypt_message(protobuf_message)
+        if encrypted_uid is None:
+            app.logger.error("Encryption failed.")
+            return None
+        tasks = []
+        tokens = load_tokens(server_name)
+        if tokens is None:
+            app.logger.error("Failed to load tokens.")
+            return None
+        for i in range(100):
+            token = tokens[i % len(tokens)]["token"]
+            tasks.append(send_request(encrypted_uid, token, url))
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return results
+    except Exception as e:
+        app.logger.error(f"Exception in send_multiple_requests: {e}")
+        return None
 
-# Function to check if message is in allowed group
-def is_in_group(message):
-    chat_id = message.chat.id
-    return chat_id == GROUP_ID
+def create_protobuf(uid):
+    try:
+        message = uid_generator_pb2.uid_generator()
+        message.saturn_ = int(uid)
+        message.garena = 1
+        return message.SerializeToString()
+    except Exception as e:
+        app.logger.error(f"Error creating uid protobuf: {e}")
+        return None
 
-# Start command (accessible in group only)
-@bot.message_handler(commands=['start'])
-def start_cmd(message):
-    if not is_in_group(message):
-        bot.reply_to(message, "⚠️ This bot can only be used in the designated group.")
-        return
-    
-    bot.reply_to(message,
-                 "👋 Welcome!\n\n"
-                 "Send likes with:\n"
-                 "<code>/like <region> <uid></code>\n\n"
-                 "Example:\n"
-                 "<code>/like bd 123456789</code>\n\n"
-                 "Stay updated in our group:",
-                 reply_markup=get_group_button(),
-                 parse_mode="HTML")
+def enc(uid):
+    protobuf_data = create_protobuf(uid)
+    if protobuf_data is None:
+        return None
+    encrypted_uid = encrypt_message(protobuf_data)
+    return encrypted_uid
 
-# Help command (accessible in group only)
-@bot.message_handler(commands=['help'])
-def help_cmd(message):
-    if not is_in_group(message):
-        bot.reply_to(message, "⚠️ This bot can only be used in the designated group.")
-        return
-    
-    bot.reply_to(message,
-                 "📖 <b>LikeBot Help</b>\n\n"
-                 "Use command:\n"
-                 "<code>/like <region> <uid></code>\n\n"
-                 "Example:\n"
-                 "<code>/like bd 123456789</code>\n\n"
-                 "Supported regions: bd, in, pk, id, th, sg, eu, etc.",
-                 parse_mode="HTML")
+def make_request(encrypt, server_name, token):
+    try:
+        if server_name == "IND":
+            url = "https://client.ind.freefiremobile.com/GetPlayerPersonalShow"
+        elif server_name in {"BR", "US", "SAC", "NA"}:
+            url = "https://client.us.freefiremobile.com/GetPlayerPersonalShow"
+        else:
+            url = "https://clientbp.ggblueshark.com/GetPlayerPersonalShow"
+        edata = bytes.fromhex(encrypt)
+        headers = {
+            'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)",
+            'Connection': "Keep-Alive",
+            'Accept-Encoding': "gzip",
+            'Authorization': f"Bearer {token}",
+            'Content-Type': "application/x-www-form-urlencoded",
+            'Expect': "100-continue",
+            'X-Unity-Version': "2018.4.11f1",
+            'X-GA': "v1 1",
+            'ReleaseVersion': "OB50"
+        }
+        response = requests.post(url, data=edata, headers=headers, verify=False)
+        hex_data = response.content.hex()
+        binary = bytes.fromhex(hex_data)
+        decode = decode_protobuf(binary)
+        if decode is None:
+            app.logger.error("Protobuf decoding returned None.")
+        return decode
+    except Exception as e:
+        app.logger.error(f"Error in make_request: {e}")
+        return None
 
-# Like command (accessible in group only)
-@bot.message_handler(commands=['like'])
-def like_cmd(message):
-    if not is_in_group(message):
-        bot.reply_to(message, "⚠️ This bot can only be used in the designated group.")
-        return
-    
-    args = message.text.split()
-    if len(args) < 3:
-        bot.reply_to(message,
-                     "⚠️ Wrong usage!\n\n"
-                     "Correct format:\n"
-                     "<code>/like <region> <uid></code>",
-                     parse_mode="HTML")
-        return
+def decode_protobuf(binary):
+    try:
+        items = like_count_pb2.Info()
+        items.ParseFromString(binary)
+        return items
+    except DecodeError as e:
+        app.logger.error(f"Error decoding Protobuf data: {e}")
+        return None
+    except Exception as e:
+        app.logger.error(f"Unexpected error during protobuf decoding: {e}")
+        return None
 
-    region = args[1].lower()
-    uid = args[2]
+def fetch_player_info(uid):
+    try:
+        url = f"https://nr-codex-info.vercel.app/get?uid={uid}"
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            account_info = data.get("AccountInfo", {})
+            return {
+                "Level": account_info.get("AccountLevel", "NA"),
+                "Region": account_info.get("AccountRegion", "NA"),
+                "ReleaseVersion": account_info.get("ReleaseVersion", "NA")
+            }
+        else:
+            app.logger.error(f"Player info API failed with status code: {response.status_code}")
+            return {"Level": "NA", "Region": "NA", "ReleaseVersion": "NA"}
+    except Exception as e:
+        app.logger.error(f"Error fetching player info from API: {e}")
+        return {"Level": "NA", "Region": "NA", "ReleaseVersion": "NA"}
+
+@app.route('/like', methods=['GET'])
+def handle_requests():
+    uid = request.args.get("uid")
+    server_name = request.args.get("server_name", "").upper()
+    if not uid or not server_name:
+        return jsonify({"error": "UID and server_name are required"}), 400
 
     try:
-        resp = requests.get(f"{LIKE_API_URL}?server_name={region}&uid={uid}", timeout=15)
-        if resp.status_code != 200:
-            bot.send_message(message.chat.id, "🚨 API not responding, please try later.")
-            return
-        data = resp.json()
+        def process_request():
+            # Fetch player info from the new API
+            player_info = fetch_player_info(uid)
+            region = player_info["Region"]
+            level = player_info["Level"]
+            release_version = player_info["ReleaseVersion"]
+
+            # Validate server_name against region from API
+            if region != "NA" and server_name != region:
+                app.logger.warning(f"Server name {server_name} does not match API region {region}. Using API region.")
+                server_name_used = region
+            else:
+                server_name_used = server_name
+
+            tokens = load_tokens(server_name_used)
+            if tokens is None:
+                raise Exception("Failed to load tokens.")
+            token = tokens[0]['token']
+            encrypted_uid = enc(uid)
+            if encrypted_uid is None:
+                raise Exception("Encryption of UID failed.")
+
+            before = make_request(encrypted_uid, server_name_used, token)
+            if before is None:
+                raise Exception("Failed to retrieve initial player info.")
+            try:
+                jsone = MessageToJson(before)
+            except Exception as e:
+                raise Exception(f"Error converting 'before' protobuf to JSON: {e}")
+            data_before = json.loads(jsone)
+            before_like = data_before.get('AccountInfo', {}).get('Likes', 0)
+            try:
+                before_like = int(before_like)
+            except Exception:
+                before_like = 0
+            app.logger.info(f"Likes before command: {before_like}")
+
+            if server_name_used == "IND":
+                url = "https://client.ind.freefiremobile.com/LikeProfile"
+            elif server_name_used in {"BR", "US", "SAC", "NA"}:
+                url = "https://client.us.freefiremobile.com/LikeProfile"
+            else:
+                url = "https://clientbp.ggblueshark.com/LikeProfile"
+
+            asyncio.run(send_multiple_requests(uid, server_name_used, url))
+
+            after = make_request(encrypted_uid, server_name_used, token)
+            if after is None:
+                raise Exception("Failed to retrieve player info after like requests.")
+            try:
+                jsone_after = MessageToJson(after)
+            except Exception as e:
+                raise Exception(f"Error converting 'after' protobuf to JSON: {e}")
+            data_after = json.loads(jsone_after)
+            after_like = int(data_after.get('AccountInfo', {}).get('Likes', 0))
+            player_uid = int(data_after.get('AccountInfo', {}).get('UID', 0))
+            player_name = str(data_after.get('AccountInfo', {}).get('PlayerNickname', ''))
+            like_given = after_like - before_like
+            status = 1 if like_given != 0 else 2
+            result = {
+                "LikesGivenByAPI": like_given,
+                "LikesafterCommand": after_like,
+                "LikesbeforeCommand": before_like,
+                "PlayerNickname": player_name,
+                "Region": region,
+                "Level": level,
+                "UID": player_uid,
+                "ReleaseVersion": release_version,
+                "status": status
+            }
+            return result
+
+        result = process_request()
+        return jsonify(result)
     except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Connection Error: {e}")
-        return
+        app.logger.error(f"Error processing request: {e}")
+        return jsonify({"error": str(e)}), 500
 
-    status = data.get("status", 0)
-
-    if status == 1:
-        likes_given = int(data.get("LikesGivenByAPI", 0) or 0)
-        likes_before = int(data.get("LikesbeforeCommand", 0) or 0)
-        likes_after = int(data.get("LikesafterCommand", 0) or 0)
-
-        text = (
-            "✅ <b>LIKE SUCCESS</b>\n\n"
-            "👤 <b>Player:</b> {name}\n"
-            "🆔 <b>UID:</b> {uid}\n"
-            "🌍 <b>Region:</b> {region}\n\n"
-            "📊 <b>Like Report</b>\n"
-            "• Before: {before}\n"
-            "• Sent: {sent}\n"
-            "• Now: {after}\n\n"
-            "🎯 Keep supporting!"
-        ).format(
-            name=data.get("PlayerNickname", "Unknown"),
-            uid=data.get("UID", uid),
-            region=region.upper(),
-            before=likes_before,
-            sent=likes_given,
-            after=likes_after
-        )
-
-        bot.send_message(message.chat.id, text, parse_mode="HTML")
-
-    elif status == 2:
-        text = (
-            "ℹ️ <b>Already Liked</b>\n\n"
-            "👤 <b>Player:</b> {name}\n"
-            "🆔 <b>UID:</b> {uid}\n"
-            "🌍 <b>Region:</b> {region}\n\n"
-            "💖 Current Likes: {likes}\n\n"
-            "⚡ This account was already liked earlier."
-        ).format(
-            name=data.get("PlayerNickname", "Unknown"),
-            uid=data.get("UID", uid),
-            region=region.upper(),
-            likes=data.get("LikesafterCommand", "?")
-        )
-
-        bot.send_message(message.chat.id, text, parse_mode="HTML")
-
-    else:
-        text = (
-            "❌ <b>Like Failed</b>\n\n"
-            "🆔 UID: {uid}\n"
-            "🌍 Region: {region}\n\n"
-            "Please check your details and try again."
-        ).format(uid=uid, region=region.upper())
-
-        bot.send_message(message.chat.id, text, parse_mode="HTML")
-
-# Function to run the bot
-def run_bot():
-    bot.polling(none_stop=True)
-
-# Start Flask and Bot in separate threads
-if __name__ == "__main__":
-    # Start bot in a separate thread
-    bot_thread = Thread(target=run_bot)
-    bot_thread.start()
-    
-    # Start Flask server
-    port = int(os.environ.get("PORT", 5000))  # Render provides PORT env variable
-    app.run(host="0.0.0.0", port=port)
+if __name__ == '__main__':
+    app.run(debug=True, use_reloader=False)
