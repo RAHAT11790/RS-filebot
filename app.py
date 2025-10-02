@@ -1,4 +1,4 @@
-#this code was made by cutehack
+# this code was made by cutehack
 
 from flask import Flask, request, jsonify
 import asyncio
@@ -7,14 +7,25 @@ from Crypto.Util.Padding import pad
 from google.protobuf.json_format import MessageToJson
 import binascii
 import aiohttp
-from google.protobuf.json_format import MessageToDict
 import requests
 import json
 import like_pb2
 import like_count_pb2
 import uid_generator_pb2
+import time
+from collections import defaultdict
+from datetime import datetime
 
 app = Flask(__name__)
+
+# ✅ Per-key rate limit setup
+KEY_LIMIT = 150
+token_tracker = defaultdict(lambda: [0, time.time()])  # token: [count, last_reset_time]
+
+def get_today_midnight_timestamp():
+    now = datetime.now()
+    midnight = datetime(now.year, now.month, now.day)
+    return midnight.timestamp()
 
 def load_tokens(server_name):
     if server_name == "IND":
@@ -26,21 +37,20 @@ def load_tokens(server_name):
     else:
         with open("token_bd.json", "r") as f:
             return json.load(f)
-    
+
 def encrypt_message(plaintext):
     key = b'Yg&tc%DEuh6%Zc^8'
-    iv = b'6oyZDr22E3ychjM%' 
+    iv = b'6oyZDr22E3ychjM%'
     cipher = AES.new(key, AES.MODE_CBC, iv)
     padded_message = pad(plaintext, AES.block_size)
     encrypted_message = cipher.encrypt(padded_message)
     return binascii.hexlify(encrypted_message).decode('utf-8')
-    
+
 def create_protobuf_message(user_id, region):
     message = like_pb2.like()
     message.uid = int(user_id)
     message.region = region
     return message.SerializeToString()
- #this code was made by cutehack
 
 async def send_request(encrypted_uid, token, url):
     edata = bytes.fromhex(encrypted_uid)
@@ -57,21 +67,17 @@ async def send_request(encrypted_uid, token, url):
     }
     async with aiohttp.ClientSession() as session:
         async with session.post(url, data=edata, headers=headers) as response:
-            if response.status != 200:
-                print(f"Request failed with status code: {response.status}")
             return response.status
 
 async def send_multiple_requests(uid, server_name, url):
-    region = (server_name)
+    region = server_name
     protobuf_message = create_protobuf_message(uid, region)
     encrypted_uid = encrypt_message(protobuf_message)
-    
     tasks = []
     tokens = load_tokens(server_name)
     for i in range(100):
         token = tokens[i % len(tokens)]["token"]
         tasks.append(send_request(encrypted_uid, token, url))
-    
     results = await asyncio.gather(*tasks)
     return results
 
@@ -82,9 +88,9 @@ def create_protobuf(uid):
     return message.SerializeToString()
 
 def enc(uid):
-	protobuf_data = create_protobuf(uid)
-	encrypted_uid = encrypt_message(protobuf_data)
-	return encrypted_uid
+    protobuf_data = create_protobuf(uid)
+    encrypted_uid = encrypt_message(protobuf_data)
+    return encrypted_uid
 
 def make_request(encrypt, server_name, token):
     if server_name == "IND":
@@ -95,7 +101,6 @@ def make_request(encrypt, server_name, token):
         url = "https://clientbp.ggblueshark.com/GetPlayerPersonalShow"
 
     edata = bytes.fromhex(encrypt)
-
     headers = {
         'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)",
         'Connection': "Keep-Alive",
@@ -109,17 +114,16 @@ def make_request(encrypt, server_name, token):
     }
 
     response = requests.post(url, data=edata, headers=headers, verify=False)
-    hex = response.content.hex()
-    binary = bytes.fromhex(hex)
-    decode = decode_protobuf(binary)
-    return decode
+    hex_data = response.content.hex()
+    binary = bytes.fromhex(hex_data)
+    return decode_protobuf(binary)
 
 def decode_protobuf(binary):
     try:
         items = like_count_pb2.Info()
         items.ParseFromString(binary)
         return items
-    except message.DecodeError as e:
+    except Exception as e:
         print(f"Error decoding Protobuf data: {e}")
         return None
 
@@ -127,6 +131,11 @@ def decode_protobuf(binary):
 def handle_requests():
     uid = request.args.get("uid")
     server_name = request.args.get("server_name", "").upper()
+    key = request.args.get("key")
+
+    if key != "jenil":
+        return jsonify({"error": "Invalid or missing API key 🔑"}), 403
+
     if not uid or not server_name:
         return jsonify({"error": "UID and server_name are required"}), 400
 
@@ -134,49 +143,66 @@ def handle_requests():
         data = load_tokens(server_name)
         token = data[0]['token']
         encrypt = enc(uid)
-        
+
+        today_midnight = get_today_midnight_timestamp()
+        count, last_reset = token_tracker[token]
+
+        if last_reset < today_midnight:
+            token_tracker[token] = [0, time.time()]
+            count = 0
+
+        if count >= KEY_LIMIT:
+            return {
+                "error": "Daily request limit reached for this key.",
+                "status": 429,
+                "remains": f"(0/{KEY_LIMIT})"
+            }
+
         before = make_request(encrypt, server_name, token)
         jsone = MessageToJson(before)
         data = json.loads(jsone)
-        before_like = data['AccountInfo'].get('Likes', None)
-        if before_like is None:
-        	before_like = int("0")
-        else:
-        	before_like = int(before_like)
-        print(before_like)
+        before_like = int(data['AccountInfo'].get('Likes', 0))
+
+        # Select URL
         if server_name == "IND":
             url = "https://client.ind.freefiremobile.com/LikeProfile"
         elif server_name in {"BR", "US", "SAC", "NA"}:
             url = "https://client.us.freefiremobile.com/LikeProfile"
         else:
             url = "https://clientbp.ggblueshark.com/LikeProfile"
-        
+
         asyncio.run(send_multiple_requests(uid, server_name, url))
-        
+
         after = make_request(encrypt, server_name, token)
         jsone = MessageToJson(after)
         data = json.loads(jsone)
+
         after_like = int(data['AccountInfo']['Likes'])
         id = int(data['AccountInfo']['UID'])
         name = str(data['AccountInfo']['PlayerNickname'])
+
         like_given = after_like - before_like
-        if like_given != 0:
-        	status = 1
-        else:
-        	status = 2
+        status = 1 if like_given != 0 else 2
+
+        if like_given > 0:
+            token_tracker[token][0] += 1
+            count += 1
+
+        remains = KEY_LIMIT - count
+
         result = {
             "LikesGivenByAPI": like_given,
             "LikesafterCommand": after_like,
             "LikesbeforeCommand": before_like,
             "PlayerNickname": name,
             "UID": id,
-            "status": status
+            "status": status,
+            "remains": f"({remains}/{KEY_LIMIT})"
         }
         return result
 
-    hex_result = process_request()
-    return hex_result
+    result = process_request()
+    return jsonify(result)
 
 if __name__ == '__main__':
     app.run(debug=True, use_reloader=False)
-#this code was made by cutehack
