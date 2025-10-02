@@ -15,7 +15,7 @@ def home():
 
 # Bot configuration
 BOT_TOKEN = os.environ.get("BOT_TOKEN")  # Get token from environment variable
-LIKE_API_URL = "http://free-like-giveawya-bot-seller-bd-de.vercel.app/like"
+LIKE_API_URL = "https://api-likes-alli-ff.vercel.app/like?uid=760840390"
 GROUP_ID = -1002931591443  # Group ID
 GROUP_LINK = "https://t.me/rsallanime"  # Group invite link
 
